@@ -18,14 +18,14 @@
 
   <Description DefaultValue="AI-powered email safety analysis using agentic investigation."/>
 
-  <IconUrl DefaultValue="https://safety-guard-web.onrender.com/icon-64.png"/>
+  <IconUrl DefaultValue="https://online-safety-guard.onrender.com/icon-64.png"/>
 
-  <HighResolutionIconUrl DefaultValue="https://safety-guard-web.onrender.com/icon-128.png"/>
+  <HighResolutionIconUrl DefaultValue="https://online-safety-guard.onrender.com/icon-128.png"/>
 
-  <SupportUrl DefaultValue="https://safety-guard-web.onrender.com/"/>
+  <SupportUrl DefaultValue="https://online-safety-guard.onrender.com/"/>
 
   <AppDomains>
-    <AppDomain>https://safety-guard-web.onrender.com</AppDomain>
+    <AppDomain>https://online-safety-guard.onrender.com</AppDomain>
   </AppDomains>
 
   <Hosts>
@@ -41,7 +41,7 @@
   <FormSettings>
     <Form xsi:type="ItemRead">
       <DesktopSettings>
-        <SourceLocation DefaultValue="https://safety-guard-web.onrender.com/outlook/taskpane.html"/>
+        <SourceLocation DefaultValue="https://online-safety-guard.onrender.com/outlook/taskpane.html"/>
         <RequestedHeight>600</RequestedHeight>
       </DesktopSettings>
     </Form>
@@ -114,41 +114,49 @@
 
       <bt:Images>
 
-        <bt:Image id="Icon16"
-                  DefaultValue="https://safety-guard-web.onrender.com/icon-16.png"/>
+        <bt:Image
+          id="Icon16"
+          DefaultValue="https://online-safety-guard.onrender.com/icon-16.png"/>
 
-        <bt:Image id="Icon32"
-                  DefaultValue="https://safety-guard-web.onrender.com/icon-32.png"/>
+        <bt:Image
+          id="Icon32"
+          DefaultValue="https://online-safety-guard.onrender.com/icon-32.png"/>
 
-        <bt:Image id="Icon80"
-                  DefaultValue="https://safety-guard-web.onrender.com/icon-80.png"/>
+        <bt:Image
+          id="Icon80"
+          DefaultValue="https://online-safety-guard.onrender.com/icon-80.png"/>
 
       </bt:Images>
 
       <bt:Urls>
 
-        <bt:Url id="Commands.Url"
-                DefaultValue="https://safety-guard-web.onrender.com/outlook/commands.html"/>
+        <bt:Url
+          id="Commands.Url"
+          DefaultValue="https://online-safety-guard.onrender.com/outlook/commands.html"/>
 
-        <bt:Url id="Taskpane.Url"
-                DefaultValue="https://safety-guard-web.onrender.com/outlook/taskpane.html"/>
+        <bt:Url
+          id="Taskpane.Url"
+          DefaultValue="https://online-safety-guard.onrender.com/outlook/taskpane.html"/>
 
       </bt:Urls>
 
       <bt:ShortStrings>
 
-        <bt:String id="GroupLabel"
-                    DefaultValue="Online Safety Guard"/>
+        <bt:String
+          id="GroupLabel"
+          DefaultValue="Online Safety Guard"/>
 
-        <bt:String id="AnalyzeLabel"
-                    DefaultValue="Analyze Email"/>
+        <bt:String
+          id="AnalyzeLabel"
+          DefaultValue="Analyze Email"/>
 
       </bt:ShortStrings>
 
       <bt:LongStrings>
 
-        <bt:String id="AnalyzeDescription"
-                    DefaultValue="Analyze this email for phishing, scams, suspicious links, and social engineering threats."/>
+        <bt:String
+          id="AnalyzeDescription"
+          DefaultValue="Analyze this email for phishing, scams, suspicious links, and social engineering threats."/>
 
       </bt:LongStrings>
 
