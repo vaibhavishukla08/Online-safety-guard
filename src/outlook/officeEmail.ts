@@ -19,6 +19,12 @@ export interface EmailPayload {
   recipientCount: number | null;
   attachments: Array<{ name: string; size: number | null; contentType: string | null }>;
   truncated: boolean;
+  /** RFC 5322 Message-ID — lets a linked account de-duplicate against mailbox sync. */
+  internetMessageId: string | null;
+  /** Exchange item id (fallback identifier when Message-ID is unavailable). */
+  itemId: string | null;
+  conversationId: string | null;
+  receivedAt: string | null;
 }
 
 export type ReadEmailResult = { ok: true; email: EmailPayload } | { ok: false; code: 'no_office' | 'no_item' | 'not_message' | 'body_failed' | 'empty'; message: string };
@@ -125,6 +131,17 @@ export async function readCurrentEmail(item?: Office.MessageRead | null): Promis
       recipientCount: Array.isArray(target.to) ? target.to.length + (Array.isArray(target.cc) ? target.cc.length : 0) : null,
       attachments,
       truncated,
+      internetMessageId: typeof target.internetMessageId === 'string' && target.internetMessageId.trim() ? target.internetMessageId.trim() : null,
+      itemId: typeof target.itemId === 'string' && target.itemId ? target.itemId : null,
+      conversationId: typeof target.conversationId === 'string' && target.conversationId ? target.conversationId : null,
+      receivedAt: target.dateTimeCreated instanceof Date && !Number.isNaN(target.dateTimeCreated.getTime()) ? target.dateTimeCreated.toISOString() : null,
     },
   };
+}
+
+/** Mailbox owner as reported by Office.js (used only as a label when linking). */
+export function mailboxLabel(): string {
+  const host = window.Office?.context?.mailbox?.diagnostics?.hostName || 'Outlook';
+  const email = window.Office?.context?.mailbox?.userProfile?.emailAddress || '';
+  return email ? `${host} (${email})` : host;
 }

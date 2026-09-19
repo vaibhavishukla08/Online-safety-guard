@@ -29,10 +29,11 @@ import { runSocialEngineeringAgent, socialEngineeringNeeded } from './socialEngi
 import { financialCheckNeeded, runFinancialAgent } from './financialAgent';
 import { parseConversation, runConversationAgent } from './conversationAgent';
 import { runThreatIntelAgent, threatIntelNeeded } from './threatIntelAgent';
-import { runRiskAgent } from './riskAgent';
-import { runProtectionAgent } from './protectionAgent';
+import { runRiskAgent, type RiskOutcome } from './riskAgent';
+import { buildBasePlan, buildRecommendedResponse, runProtectionAgent } from './protectionAgent';
+import { buildScamDna, computeConfidence, levelForScore, sumIndicators } from '../rules/scoring';
 import { addEvidence, addIndicator } from './context';
-import type { EmailEnvelope, EngineMode, InputType, InvestigationInput, InvestigationReport, TraceStep } from '../../shared/investigation';
+import type { AgentId, EmailEnvelope, EngineMode, InputType, InvestigationInput, InvestigationReport, TraceStep, Verdict } from '../../shared/investigation';
 
 export interface InvestigationRequest {
   inputType: InputType;
@@ -94,6 +95,41 @@ export function validateRequest(body: unknown): InvestigationRequest {
   if (req.inputType === 'screenshot' && !req.imageBase64) throw new InvestigationError(400, 'Please upload a screenshot to investigate.', 'empty_input');
   if (req.imageMime && !/^image\/(png|jpe?g|webp|gif|heic|heif)$/i.test(req.imageMime)) throw new InvestigationError(400, 'Unsupported image type. Use PNG, JPG or WebP.', 'bad_request');
   return req;
+}
+
+/**
+ * Fault isolation: an unexpected exception inside one agent is recorded on its
+ * trace step ("failed") and as a notice; every other agent still runs and the
+ * report is still produced. Returns the fallback when the agent threw.
+ */
+async function guarded<T>(ctx: AgentContext, agent: AgentId, title: string, run: () => Promise<T>, fallback: () => T): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (err instanceof InvestigationError) throw err;
+    console.error(`[orchestrator] ${agent} agent failed:`, err);
+    const running = [...ctx.trace].reverse().find((t) => t.agent === agent && t.status === 'running');
+    if (running) {
+      running.status = 'failed';
+      running.summary = `${title} failed unexpectedly — results reflect the remaining agents.`;
+      ctx.emit({ ...running });
+    } else {
+      const step: TraceStep = { id: `${agent}-failed-${Date.now()}`, agent, title, summary: `${title} failed unexpectedly — results reflect the remaining agents.`, status: 'failed', timestamp: new Date().toISOString() };
+      ctx.trace.push(step);
+      ctx.emit({ ...step });
+    }
+    ctx.notices.push(`${title} failed unexpectedly; results reflect the remaining checks.`);
+    return fallback();
+  }
+}
+
+/** Deterministic verdict used only if the Risk Assessment Agent itself throws. */
+function fallbackRisk(ctx: AgentContext): RiskOutcome {
+  const riskScore = sumIndicators(ctx.indicators);
+  const level = levelForScore(riskScore);
+  const { confidence, note } = computeConfidence(ctx.indicators, riskScore);
+  const verdict: Verdict = { level, riskScore, scamType: level === 'LOW' ? 'No Threat Detected' : 'Suspicious Message', summary: `Rule-based scoring found ${ctx.indicators.filter((i) => i.points > 0).length} risk indicators (${riskScore}/100).`, confidence, confidenceNote: note };
+  return { verdict, scamDna: buildScamDna(ctx.indicators), whyFlagged: ctx.indicators.filter((i) => i.points > 0).map((i) => i.label) };
 }
 
 /**
@@ -180,11 +216,11 @@ export async function investigate(req: InvestigationRequest, onTrace: (step: Tra
 
   // ------------------------------------------------------------- INVESTIGATE
   // Stage 1: the Message Agent builds the shared understanding everything else uses.
-  await runMessageAgent(ctx);
+  await guarded(ctx, 'message', 'Message Agent', () => runMessageAgent(ctx), () => undefined);
 
   // Stage 2: URL agent is deterministic and fast; run it before deciding on identity checks.
   if (input.urls.length) {
-    await runUrlAgent(ctx);
+    await guarded(ctx, 'url', 'URL Agent', () => runUrlAgent(ctx), () => undefined);
   } else {
     skipAgent(ctx, 'url', 'URL Agent', 'no links found in the input');
   }
@@ -214,12 +250,19 @@ export async function investigate(req: InvestigationRequest, onTrace: (step: Tra
 
   await Promise.all(parallel.map((p) => p.catch((err) => {
     console.error('[orchestrator] agent failed:', err);
+    for (const step of ctx.trace) {
+      if (step.status === 'running' && !['orchestrator', 'message', 'url', 'risk', 'protection'].includes(step.agent)) {
+        step.status = 'failed';
+        step.summary = `${step.title} failed unexpectedly — results reflect the remaining agents.`;
+        ctx.emit({ ...step });
+      }
+    }
     ctx.notices.push('One investigation step failed unexpectedly; results reflect the remaining agents.');
   })));
 
   // ---------------------------------------------------------------- ASSESS
-  const risk = await runRiskAgent(ctx);
-  const protection = await runProtectionAgent(ctx, risk.verdict);
+  const risk = await guarded(ctx, 'risk', 'Risk Assessment Agent', () => runRiskAgent(ctx), () => fallbackRisk(ctx));
+  const protection = await guarded(ctx, 'protection', 'Protection Agent', () => runProtectionAgent(ctx, risk.verdict), () => ({ plan: buildBasePlan(ctx, risk.verdict), recommendedResponse: buildRecommendedResponse(ctx, risk.verdict.level) }));
 
   // ---------------------------------------------------------------- REPORT
   const engine: EngineMode = !isGeminiConfigured() ? 'deterministic' : ctx.aiCallsSucceeded === 0 ? 'deterministic' : ctx.aiFailures.length ? 'hybrid' : 'gemini';

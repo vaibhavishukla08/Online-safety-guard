@@ -40,7 +40,7 @@ export async function runIdentityAgent(ctx: AgentContext): Promise<void> {
 
   const observedDomains = Array.from(new Set(ctx.urls.map((u) => u.registrableDomain)));
   const senderDom = senderDomain(ctx.input.sender);
-  if (senderDom) observedDomains.push(senderDom);
+  if (senderDom && !observedDomains.includes(senderDom)) observedDomains.push(senderDom);
 
   // 1. Deterministic: registry match (prefer the org the message text names, then sender/vision/AI claims).
   const registryHits = findClaimedOrganizations(ctx.input.message, ctx.input.sender);

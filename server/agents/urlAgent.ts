@@ -29,6 +29,9 @@ export function analyzeUrl(raw: string): UrlFinding | null {
   const subdomainDepth = ip ? 0 : Math.max(0, hostname.split('.').length - regDomain.split('.').length);
   if (subdomainDepth >= 2) flags.push(`Deep subdomain nesting (${subdomainDepth} levels)`);
   if (/^https?:\/\/[^/]*@/i.test(normalized)) flags.push('Embedded credentials ("@") in URL');
+  // `new URL()` converts internationalized names to punycode (xn--); such hosts can hide look-alike characters.
+  const punycode = /(^|\.)xn--/i.test(hostname);
+  if (punycode) flags.push('Internationalized (punycode) hostname - can disguise look-alike characters');
 
   // Look-alike check: does the host contain a known brand without being that brand's domain?
   let lookalikeOf: string | null = null;
@@ -44,7 +47,7 @@ export function analyzeUrl(raw: string): UrlFinding | null {
     }
   }
 
-  return { raw, normalized, hostname, registrableDomain: regDomain, tld, isIpAddress: ip, suspiciousTld, hyphenCount, isShortener, hasCredentialKeywords: credentialKeywords, lookalikeOf, subdomainDepth, flags };
+  return { raw, normalized, hostname, registrableDomain: regDomain, tld, isIpAddress: ip, suspiciousTld, hyphenCount, isShortener, hasCredentialKeywords: credentialKeywords, lookalikeOf, subdomainDepth, punycode, flags };
 }
 
 export async function runUrlAgent(ctx: AgentContext): Promise<void> {
@@ -85,6 +88,10 @@ export async function runUrlAgent(ctx: AgentContext): Promise<void> {
     }
     if (f.hasCredentialKeywords) {
       addIndicator(ctx, { id: 'credential_url', label: 'Login/verify keywords in URL', points: 8, evidence: f.normalized.slice(0, 80), source: 'rule', agent: 'url' });
+    }
+    if (f.punycode) {
+      addIndicator(ctx, { id: 'punycode_host', label: 'Internationalized (punycode) hostname', points: 10, evidence: f.hostname, source: 'rule', agent: 'url' });
+      addEvidence(ctx, { id: 'ev-punycode_host', title: 'Internationalized domain name', description: `"${f.hostname}" uses punycode (xn--), which can make a look-alike address appear identical to a real brand in some clients.`, source: 'rule', agent: 'url', severity: 'medium' });
     }
     if (f.hyphenCount >= 2 && !f.suspiciousTld) {
       addIndicator(ctx, { id: 'hyphenated_host', label: 'Hyphen-heavy hostname', points: 6, evidence: f.hostname, source: 'rule', agent: 'url' });

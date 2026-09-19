@@ -5,18 +5,45 @@
  * /api/analyze-email channel (same Safety Orchestrator + agents + Gemini), and
  * renders a compact result. All text is rendered as React text nodes (never
  * innerHTML), links are never opened, attachments are never downloaded.
+ *
+ * Account linking: Outlook loads this pane in an iframe where third-party
+ * cookies are unreliable, so the pane authenticates with a revocable bearer
+ * token obtained from a one-time code generated in the web app (Settings →
+ * Outlook add-in). Linked → every analysis is saved to the user's Outlook
+ * history and an already-analysed email is shown from storage instead of being
+ * analysed again. Unlinked → analysis works exactly as before, nothing is saved.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ShieldAlert, ShieldCheck, AlertTriangle, OctagonAlert, Loader2, Mail, Paperclip, CheckCircle2, ChevronDown, ChevronUp, RefreshCw, Drama, Link2, ExternalLink, Cpu, Info } from 'lucide-react';
-import type { InvestigationReport, TraceStep } from '../types';
-import { analyzeEmailStream } from '../api/client';
+import { ShieldAlert, ShieldCheck, AlertTriangle, OctagonAlert, Loader2, Mail, Paperclip, CheckCircle2, ChevronDown, ChevronUp, RefreshCw, Drama, Link2, ExternalLink, Cpu, Info, KeyRound, UserCheck, Unlink, Save } from 'lucide-react';
+import type { InvestigationReport, PublicUser, TraceStep } from '../types';
+import { accountApi, analyzeEmailStream, setBearerToken, type AnalysisMeta } from '../api/client';
 import { LEVEL_TOKENS, ENGINE_LABEL, AGENT_META } from '../utils/risk';
 import { RiskBadge, SourceTag, Notice, PrimaryButton, SecondaryButton } from '../components/ui/primitives';
 import { InvestigationTrace } from '../components/investigation/InvestigationTrace';
 import { ScamDnaPanel } from '../components/investigation/AnalysisPanels';
-import { readCurrentEmail, waitForOffice, officeAvailable, extractUrlsFromText, MAX_BODY_CHARS, type EmailPayload } from './officeEmail';
+import { readCurrentEmail, waitForOffice, officeAvailable, extractUrlsFromText, mailboxLabel, MAX_BODY_CHARS, type EmailPayload } from './officeEmail';
 
 type Phase = 'booting' | 'no_office' | 'ready' | 'analyzing' | 'done' | 'error';
+
+/** localStorage key for the add-in bearer token (partitioned per add-in origin by the browser). */
+const TOKEN_KEY = 'osg_addin_token';
+
+function loadToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+function storeToken(token: string | null): void {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* storage unavailable — the link lasts for this session only */
+  }
+  setBearerToken(token);
+}
 
 const LEVEL_ICON = { LOW: ShieldCheck, MEDIUM: AlertTriangle, HIGH: ShieldAlert, CRITICAL: OctagonAlert } as const;
 const LEVEL_HEADLINE = { LOW: 'No strong scam indicators', MEDIUM: 'Suspicious — verify before acting', HIGH: 'High-risk email', CRITICAL: 'Critical — treat as a scam' } as const;
@@ -44,7 +71,48 @@ export const OutlookTaskPane: React.FC = () => {
   const [report, setReport] = useState<InvestigationReport | null>(null);
   const [showInvestigation, setShowInvestigation] = useState(false);
   const [manual, setManual] = useState({ subject: '', sender: '', body: '' });
+  const [account, setAccount] = useState<PublicUser | null>(null);
+  const [accountChecked, setAccountChecked] = useState(false);
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [linkCode, setLinkCode] = useState('');
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const [meta, setMeta] = useState<AnalysisMeta | null>(null);
   const autoRan = useRef(false);
+
+  // -------------------------------------------------------------- account link
+  useEffect(() => {
+    // A stored add-in token wins; otherwise a same-origin session cookie may still identify the user
+    // (e.g. when the pane is opened in a normal browser tab for testing).
+    const token = loadToken();
+    if (token) setBearerToken(token);
+    accountApi.me().then((res) => {
+      if (res.ok) setAccount(res.data.user);
+      else if (token && res.error.status === 401) storeToken(null); // revoked or expired
+      setAccountChecked(true);
+    });
+  }, []);
+
+  const linkAccount = async () => {
+    setLinkBusy(true);
+    setLinkError(null);
+    const res = await accountApi.redeemLinkCode(linkCode, `Outlook add-in — ${officeAvailable() ? mailboxLabel() : 'browser test'}`);
+    setLinkBusy(false);
+    if (!res.ok) {
+      setLinkError(res.error.message);
+      return;
+    }
+    storeToken(res.data.token);
+    setAccount(res.data.user);
+    setLinkOpen(false);
+    setLinkCode('');
+  };
+
+  const unlinkAccount = () => {
+    storeToken(null);
+    setAccount(null);
+    setMeta(null);
+  };
 
   // ---------------------------------------------------------------- Office.js
   const loadEmail = useCallback(async () => {
@@ -96,13 +164,14 @@ export const OutlookTaskPane: React.FC = () => {
   }, []);
 
   // ---------------------------------------------------------------- analysis
-  const runAnalysis = useCallback(async (payload: EmailPayload) => {
+  const runAnalysis = useCallback(async (payload: EmailPayload, force = false) => {
     setPhase('analyzing');
     setError(null);
     setTrace([]);
     setReport(null);
+    setMeta(null);
     setShowInvestigation(false);
-    const res = await analyzeEmailStream(payload, (step) => {
+    const res = await analyzeEmailStream({ ...payload, force }, (step) => {
       setTrace((prev) => {
         const idx = prev.findIndex((s) => s.id === step.id);
         if (idx === -1) return [...prev, step];
@@ -112,7 +181,8 @@ export const OutlookTaskPane: React.FC = () => {
       });
     });
     if (res.ok) {
-      setReport(res.data);
+      setReport(res.data.report);
+      setMeta(res.data.meta);
       setPhase('done');
     } else {
       setError(friendlyError(res.error.code, res.error.message));
@@ -120,13 +190,15 @@ export const OutlookTaskPane: React.FC = () => {
     }
   }, []);
 
-  const analyzeCurrent = async () => {
+  const analyzeCurrent = async (force = false) => {
     const result = officeAvailable() ? await loadEmail() : null;
     if (result && result.ok) {
-      await runAnalysis(result.email);
+      await runAnalysis(result.email, force);
     } else if (!officeAvailable() && (manual.subject.trim() || manual.body.trim())) {
       const body = manual.body.slice(0, MAX_BODY_CHARS);
-      await runAnalysis({ subject: manual.subject.trim(), sender: '', senderEmail: manual.sender.trim(), body, urls: extractUrlsFromText(`${manual.subject}\n${body}`), recipientCount: null, attachments: [], truncated: manual.body.length > MAX_BODY_CHARS });
+      // Browser test mode: a stable pseudo message id lets a linked account exercise save/de-dup too.
+      const pseudoId = `manual-${simpleHash(`${manual.subject}|${manual.sender}|${body}`)}@online-safety-guard.local`;
+      await runAnalysis({ subject: manual.subject.trim(), sender: '', senderEmail: manual.sender.trim(), body, urls: extractUrlsFromText(`${manual.subject}\n${body}`), recipientCount: null, attachments: [], truncated: manual.body.length > MAX_BODY_CHARS, internetMessageId: pseudoId, itemId: null, conversationId: null, receivedAt: null }, force);
     }
   };
 
@@ -143,6 +215,37 @@ export const OutlookTaskPane: React.FC = () => {
             <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">AI-powered protection against phishing, scams and social engineering.</p>
           </div>
         </div>
+        {accountChecked && (
+          <div className="mt-2 flex items-center justify-between gap-2 text-[11px]">
+            {account ? (
+              <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300 font-semibold min-w-0"><UserCheck className="w-3.5 h-3.5 flex-shrink-0" aria-hidden="true" /> <span className="truncate">Saving to {account.email}</span></span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-slate-500 dark:text-slate-400"><Save className="w-3.5 h-3.5" aria-hidden="true" /> Analyses are not being saved</span>
+            )}
+            {account ? (
+              <button type="button" onClick={unlinkAccount} className="inline-flex items-center gap-1 text-slate-500 hover:text-rose-600 cursor-pointer whitespace-nowrap"><Unlink className="w-3 h-3" aria-hidden="true" /> Unlink</button>
+            ) : (
+              <button id="btn-link-account" type="button" onClick={() => setLinkOpen((v) => !v)} className="inline-flex items-center gap-1 font-semibold text-rose-700 dark:text-rose-300 hover:underline cursor-pointer whitespace-nowrap"><KeyRound className="w-3 h-3" aria-hidden="true" /> Link account</button>
+            )}
+          </div>
+        )}
+        {linkOpen && !account && (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void linkAccount();
+            }}
+            className="mt-2 p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 space-y-2"
+          >
+            <p className="text-[11px] text-slate-600 dark:text-slate-300">Sign in to the Online Safety Guard website → <strong>Settings → Outlook add-in → Generate link code</strong>, then enter it here. Linked analyses appear in your Outlook history and can raise notifications.</p>
+            <div className="flex gap-1.5">
+              <input id="link-code-input" aria-label="Link code" value={linkCode} onChange={(e) => setLinkCode(e.target.value.toUpperCase())} placeholder="ABCD-EFGH" maxLength={9} className="flex-1 px-2.5 py-1.5 rounded-md bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-sm font-mono tracking-widest uppercase" />
+              <SecondaryButton type="submit" disabled={linkBusy || linkCode.replace(/[^A-Z0-9]/g, '').length !== 8}>{linkBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> : <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />} Link</SecondaryButton>
+            </div>
+            {linkError && <p className="text-[11px] text-rose-700 dark:text-rose-300">{linkError}</p>}
+            <a href="/settings" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-900 dark:hover:text-white"><ExternalLink className="w-3 h-3" aria-hidden="true" /> Open website settings</a>
+          </form>
+        )}
       </header>
 
       <main className="px-4 py-4 space-y-4">
@@ -161,7 +264,7 @@ export const OutlookTaskPane: React.FC = () => {
               <input aria-label="Subject" value={manual.subject} onChange={(e) => setManual({ ...manual, subject: e.target.value })} placeholder="Subject" className="w-full px-3 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-sm" />
               <input aria-label="Sender email" value={manual.sender} onChange={(e) => setManual({ ...manual, sender: e.target.value })} placeholder="Sender email (e.g. alerts@sbi-secure-login.xyz)" className="w-full px-3 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-sm font-mono" />
               <textarea aria-label="Email body" value={manual.body} onChange={(e) => setManual({ ...manual, body: e.target.value })} rows={6} placeholder="Email body" className="w-full px-3 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-sm font-mono" />
-              <PrimaryButton id="btn-analyze-email" onClick={analyzeCurrent} disabled={!manual.subject.trim() && !manual.body.trim()} className="w-full">
+              <PrimaryButton id="btn-analyze-email" onClick={() => analyzeCurrent(false)} disabled={!manual.subject.trim() && !manual.body.trim()} className="w-full">
                 <Mail className="w-4 h-4" aria-hidden="true" /> Analyze This Email
               </PrimaryButton>
             </div>
@@ -172,7 +275,7 @@ export const OutlookTaskPane: React.FC = () => {
           <div className="space-y-3">
             {email ? <EmailSummary email={email} /> : readError ? <Notice tone="warn">{readError}</Notice> : null}
             {error && <Notice tone="error">{error}</Notice>}
-            <PrimaryButton id="btn-analyze-email" onClick={analyzeCurrent} className="w-full">
+            <PrimaryButton id="btn-analyze-email" onClick={() => analyzeCurrent(false)} className="w-full">
               {error ? <RefreshCw className="w-4 h-4" aria-hidden="true" /> : <Mail className="w-4 h-4" aria-hidden="true" />}
               {error ? 'Try again' : 'Analyze This Email'}
             </PrimaryButton>
@@ -191,7 +294,16 @@ export const OutlookTaskPane: React.FC = () => {
         )}
 
         {phase === 'done' && report && (
-          <ResultView report={report} email={email} trace={trace.length ? trace : report.trace} showInvestigation={showInvestigation} onToggleInvestigation={() => setShowInvestigation((v) => !v)} onReanalyze={analyzeCurrent} />
+          <>
+            {meta?.saved && meta.cached && (
+              <Notice tone="info"><strong>Showing the saved analysis</strong> from {new Date(report.timestamp).toLocaleString()} — this email was analysed before, so it was not analysed again. Use <em>Re-analyze</em> to run it afresh.</Notice>
+            )}
+            {meta?.saved && !meta.cached && <Notice tone="success">Saved to your Outlook history on the Online Safety Guard website.</Notice>}
+            {meta && !meta.saved && meta.reason === 'not_linked' && (
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 flex items-start gap-1.5"><Save className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" aria-hidden="true" /> Not saved — <button type="button" onClick={() => setLinkOpen(true)} className="underline font-semibold cursor-pointer">link your account</button> to keep a history of analysed emails.</p>
+            )}
+            <ResultView report={report} email={email} trace={trace.length ? trace : report.trace} showInvestigation={showInvestigation} onToggleInvestigation={() => setShowInvestigation((v) => !v)} onReanalyze={() => analyzeCurrent(true)} />
+          </>
         )}
       </main>
 
@@ -392,6 +504,16 @@ const ResultView: React.FC<ResultProps> = ({ report, email, trace, showInvestiga
     </div>
   );
 };
+
+/** Tiny stable hash for browser-test pseudo message ids (not security relevant). */
+function simpleHash(input: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h.toString(16);
+}
 
 function friendlyError(code: string, fallback: string): string {
   switch (code) {

@@ -9,6 +9,7 @@
  */
 import { GoogleGenAI } from '@google/genai';
 import { GEMINI_MODEL, TIMEOUTS } from '../config';
+import { recordFailure, recordSuccess } from '../services/health';
 
 export type GeminiErrorCode =
   | 'not_configured'
@@ -138,10 +139,12 @@ export async function generateJson<T>(opts: GenerateJsonOptions): Promise<Gemini
       return { ok: false, code: 'bad_response', message: 'AI returned an empty response.' };
     }
     const data = JSON.parse(text) as T;
+    recordSuccess('gemini');
     return { ok: true, data, model: GEMINI_MODEL };
   } catch (error) {
     const failure = classifyGeminiError(error);
     console.warn(`[gemini] ${failure.code}: ${failure.message}`);
+    recordFailure('gemini', `${failure.code}: ${failure.message}`);
     return failure;
   }
 }

@@ -49,6 +49,9 @@ declare namespace Office {
 
   interface MessageRead {
     itemType: string;
+    /** Exchange Web Services item id (stable within the mailbox). */
+    itemId?: string;
+    conversationId?: string;
     subject: string;
     from?: EmailAddressDetails;
     sender?: EmailAddressDetails;
@@ -60,8 +63,14 @@ declare namespace Office {
     dateTimeCreated?: Date;
   }
 
+  interface UserProfile {
+    displayName?: string;
+    emailAddress?: string;
+  }
+
   interface Mailbox {
     item?: MessageRead | null;
+    userProfile?: UserProfile;
     diagnostics?: { hostName?: string; hostVersion?: string };
     addHandlerAsync(eventType: EventType, handler: () => void, callback?: (result: AsyncResult<void>) => void): void;
   }

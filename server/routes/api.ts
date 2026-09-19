@@ -11,14 +11,19 @@
  *   POST /api/dashboard/summary         – AI summary of anonymized stats
  */
 import { Router, type Request, type Response } from 'express';
-import { GEMINI_MODEL, getIntelKeys, hasGeminiKey } from '../config';
+import { GEMINI_MODEL, SYNC, getAppBaseUrl, getIntelKeys, getOAuthConfig, hasGeminiKey } from '../config';
 import { checkRateLimit } from '../utils/http';
 import { investigate, InvestigationError, validateRequest } from '../agents/orchestrator';
+import { describeError, handleError } from './errors';
+import { isDbOpen, db } from '../db';
+import { analyzeEmailForUser } from '../services/emailAnalysis';
+import { normalizeMessageId, type NormalizedEmail } from '../services/emails';
+import { clientIp as authClientIp } from '../auth/middleware';
 import { generateIncidentPlan, INTERACTION_ACTIONS } from '../services/incidentResponse';
 import { generateScenario } from '../services/coach';
 import { generateDashboardSummary } from '../services/dashboard';
 import { emailToInvestigationRequest } from '../services/email';
-import type { CoachProgress, DashboardStats, IncidentContext, InteractionAction, InvestigationStreamEvent } from '../../shared/investigation';
+import type { CoachProgress, DashboardStats, IncidentContext, InteractionAction, InvestigationReport, InvestigationStreamEvent, TraceStep } from '../../shared/investigation';
 
 export const apiRouter = Router();
 
@@ -37,10 +42,20 @@ function rateLimited(req: Request, res: Response): boolean {
   return false;
 }
 
-apiRouter.get('/health', (_req, res) => {
+apiRouter.get('/health', async (_req, res) => {
   const keys = getIntelKeys();
+  const oauth = getOAuthConfig();
+  let database: { ok: boolean; kind: string } = { ok: false, kind: 'not initialised' };
+  if (isDbOpen()) {
+    try {
+      await db().get('SELECT 1 AS one');
+      database = { ok: true, kind: db().dialect };
+    } catch {
+      database = { ok: false, kind: db().dialect };
+    }
+  }
   res.json({
-    status: 'ok',
+    status: database.ok ? 'ok' : 'degraded',
     hasGeminiKey: hasGeminiKey(),
     model: GEMINI_MODEL,
     intel: {
@@ -51,6 +66,11 @@ apiRouter.get('/health', (_req, res) => {
       urlScan: Boolean(keys.urlScan),
       abuseIpDb: Boolean(keys.abuseIpDb),
     },
+    // Capability flags only — never the credentials themselves.
+    oauth: { microsoft: oauth.microsoft.configured, google: oauth.google.configured },
+    database,
+    sync: { enabled: SYNC.intervalMinutes > 0, intervalMinutes: SYNC.intervalMinutes },
+    appBaseUrl: getAppBaseUrl(),
     time: new Date().toISOString(),
   });
 });
@@ -82,13 +102,72 @@ apiRouter.post('/investigate/stream', async (req, res) => {
 // ---------------------------------------------------------------------------
 // Outlook add-in channel. The email is mapped to the existing investigation
 // request and handed to the same Safety Orchestrator — no separate detector.
+//
+// Anonymous callers get the analysis only (unchanged behaviour). Callers that
+// are linked to an account (session cookie or add-in bearer token) and supply
+// a provider message id also get the result saved to their Outlook history —
+// and an already-analysed email is returned from storage instead of being
+// analysed again (send {force: true} to re-analyse).
 // ---------------------------------------------------------------------------
+interface AddinMeta {
+  saved: boolean;
+  cached: boolean;
+  recordId: string | null;
+  reason?: string;
+}
+
+/** Build the storage record from the add-in payload when the caller is linked and identified the message. */
+function addinRecordFrom(body: Record<string, unknown>): NormalizedEmail | null {
+  const messageId = normalizeMessageId(body.internetMessageId) || normalizeMessageId(body.providerMessageId);
+  const itemId = typeof body.itemId === 'string' && body.itemId.trim() ? body.itemId.trim().slice(0, 500) : null;
+  const providerMessageId = messageId || (itemId ? `item:${itemId}` : null);
+  if (!providerMessageId) return null;
+  const str = (v: unknown, max: number) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+  const received = typeof body.receivedAt === 'string' && !Number.isNaN(Date.parse(body.receivedAt)) ? new Date(body.receivedAt).toISOString() : null;
+  return {
+    provider: 'outlook',
+    providerMessageId,
+    providerItemId: itemId,
+    internetMessageId: messageId,
+    threadId: str(body.conversationId, 300) || null,
+    senderName: str(body.sender, 200) || null,
+    senderEmail: str(body.senderEmail, 200).toLowerCase() || null,
+    recipients: [],
+    subject: str(body.subject, 500),
+    snippet: str(body.body, 200) || null,
+    receivedAt: received,
+    isRead: typeof body.isRead === 'boolean' ? body.isRead : null,
+    hasAttachments: Array.isArray(body.attachments) && body.attachments.length > 0,
+    urls: Array.isArray(body.urls) ? body.urls.filter((u): u is string => typeof u === 'string').slice(0, 10) : [],
+    webLink: null,
+    source: 'addin',
+  };
+}
+
+async function analyzeAddinEmail(req: Request, onTrace?: (step: TraceStep) => void): Promise<{ report: InvestigationReport; meta: AddinMeta }> {
+  const body = (req.body || {}) as Record<string, unknown>;
+  const mapped = emailToInvestigationRequest(body);
+  const request = validateRequest(mapped.request);
+  const record = req.auth ? addinRecordFrom(body) : null;
+  if (req.auth && record) {
+    const outcome = await analyzeEmailForUser(req.auth.user.id, record, {
+      body: typeof body.body === 'string' ? body.body : '',
+      urls: request.urls,
+      attachments: mapped.envelope.attachments.map((a) => ({ name: a.name, size: a.size, contentType: a.contentType })),
+      recipientCount: mapped.envelope.recipientCount,
+      truncated: mapped.envelope.truncated,
+    }, { force: Boolean(body.force), trigger: 'addin', ip: authClientIp(req), onTrace });
+    return { report: outcome.report, meta: { saved: true, cached: outcome.cached, recordId: outcome.record.id } };
+  }
+  const report = await investigate(request, onTrace);
+  return { report, meta: { saved: false, cached: false, recordId: null, reason: req.auth ? 'no_message_id' : 'not_linked' } };
+}
+
 apiRouter.post('/analyze-email', async (req, res) => {
   if (rateLimited(req, res)) return;
   try {
-    const { request } = emailToInvestigationRequest(req.body);
-    const report = await investigate(validateRequest(request));
-    res.json(report);
+    const { report, meta } = await analyzeAddinEmail(req);
+    res.json({ ...report, meta });
   } catch (error) {
     handleError(error, res);
   }
@@ -96,14 +175,29 @@ apiRouter.post('/analyze-email', async (req, res) => {
 
 apiRouter.post('/analyze-email/stream', async (req, res) => {
   if (rateLimited(req, res)) return;
-  let request;
   try {
-    request = validateRequest(emailToInvestigationRequest(req.body).request);
+    validateRequest(emailToInvestigationRequest(req.body).request);
   } catch (error) {
     handleError(error, res);
     return;
   }
-  await streamInvestigation(request, res);
+  res.status(200);
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  const send = (event: InvestigationStreamEvent & { meta?: AddinMeta }) => {
+    if (!res.writableEnded) res.write(JSON.stringify(event) + '\n');
+  };
+  try {
+    const { report, meta } = await analyzeAddinEmail(req, (step) => send({ type: 'trace', step }));
+    send({ type: 'result', report, meta });
+  } catch (error) {
+    const { message, code } = describeError(error);
+    send({ type: 'error', message, code });
+  } finally {
+    res.end();
+  }
 });
 
 /** Shared NDJSON streaming body for the investigate / analyze-email stream routes. */
@@ -224,16 +318,4 @@ function sanitizeStats(raw: unknown): DashboardStats {
         })
       : [],
   };
-}
-
-function describeError(error: unknown): { status: number; message: string; code: string } {
-  if (error instanceof InvestigationError) return { status: error.status, message: error.message, code: error.code };
-  if (error instanceof SyntaxError) return { status: 400, message: 'Malformed JSON body.', code: 'bad_request' };
-  console.error('[api] unexpected error:', error);
-  return { status: 500, message: 'Investigation failed unexpectedly. Please try again.', code: 'internal' };
-}
-
-function handleError(error: unknown, res: Response) {
-  const { status, message, code } = describeError(error);
-  res.status(status).json({ error: message, code });
 }

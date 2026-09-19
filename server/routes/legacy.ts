@@ -8,10 +8,18 @@
  *
  * The new agentic pipeline lives in ../agents and ./api.ts.
  */
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { Type } from "@google/genai";
-import { getGenAI } from "../gemini/client";
-import { GEMINI_MODEL } from "../config";
+import { generateJson, getGenAI, isGeminiConfigured } from "../gemini/client";
+import { GEMINI_MODEL, LIMITS } from "../config";
+import { checkRateLimit } from "../utils/http";
+import { analyzeUrl } from "../agents/urlAgent";
+import { findOrganizationByName } from "../rules/brands";
+
+function clientIp(req: Request): string {
+  const fwd = req.headers["x-forwarded-for"];
+  return (Array.isArray(fwd) ? fwd[0] : fwd?.split(",")[0])?.trim() || req.ip || "unknown";
+}
 
 export const legacyRouter = Router();
 
@@ -390,67 +398,98 @@ Provide the analysis as valid JSON matching the exact schema.`;
 });
 
 // Domain and URL Threat Inspector
+//
+// Root-cause fix for the "Inspection service error" seen in production: the
+// original handler called Gemini directly (no timeout, no error classification,
+// no fallback when a key IS configured) and any 429 / quota / timeout /
+// malformed-JSON response became an HTTP 500. It now:
+//   1. validates and safely parses the input (never fetches the URL),
+//   2. always produces a deterministic verdict from the shared URL Agent +
+//      known-organization registry,
+//   3. optionally enriches it with Gemini through generateJson() (timeouts,
+//      classified errors) and falls back to the rule-based verdict with an
+//      explicit notice when the AI is unavailable or rate-limited.
 legacyRouter.post("/inspect-domain", async (req, res) => {
+  const { allowed, retryAfterSec } = checkRateLimit(clientIp(req));
+  if (!allowed) {
+    res.setHeader("Retry-After", String(retryAfterSec));
+    return res.status(429).json({ error: `Too many requests. Try again in ${retryAfterSec}s.`, code: "rate_limited" });
+  }
   try {
-    const { url } = req.body;
-    if (!url) {
-      return res.status(400).json({ error: "URL or domain is required" });
+    const raw = (req.body || {}) as { url?: unknown };
+    if (typeof raw.url !== "string" || !raw.url.trim()) {
+      return res.status(400).json({ error: "Enter a URL or domain to inspect.", code: "empty_input" });
+    }
+    if (raw.url.length > LIMITS.urlChars) {
+      return res.status(413).json({ error: "That URL is too long to inspect.", code: "too_large" });
+    }
+    const finding = analyzeUrl(raw.url.trim());
+    const hostname = finding?.hostname;
+    if (!finding || !hostname || (!finding.isIpAddress && !hostname.includes("."))) {
+      return res.status(400).json({ error: "Invalid URL. Enter something like https://example.com or example.com.", code: "invalid_url" });
     }
 
-    const ai = getGenAI();
+    const org = finding.lookalikeOf ? findOrganizationByName(finding.lookalikeOf) : null;
+    const strong = finding.suspiciousTld || finding.isIpAddress || Boolean(finding.lookalikeOf);
+    const medium = finding.hyphenCount >= 2 || finding.isShortener || finding.hasCredentialKeywords || finding.subdomainDepth >= 2;
+    const ruleResult = {
+      domain: hostname,
+      fullUrl: finding.normalized,
+      isSuspicious: strong || medium,
+      threatLevel: (strong ? "HIGH" : medium ? "MEDIUM" : "LOW") as "HIGH" | "MEDIUM" | "LOW",
+      spoofedBrand: finding.lookalikeOf || null,
+      officialDomain: org?.officialDomains[0] || null,
+      reason: finding.flags.length ? finding.flags.join(". ") + "." : "No structural red flags: standard domain syntax, no high-abuse TLD, no known-brand look-alike pattern. This does not prove the site is safe — run the full investigation for external threat intelligence.",
+      flags: finding.flags,
+      engine: "rule-based" as "rule-based" | "gemini",
+      notice: null as string | null,
+    };
 
-    // Fast static parsing
-    let cleanUrl = url.trim();
-    if (!/^https?:\/\//i.test(cleanUrl)) {
-      cleanUrl = "https://" + cleanUrl;
+    if (!isGeminiConfigured()) {
+      return res.json({ ...ruleResult, notice: "Gemini is not configured — rule-based inspection only. Other security checks were used." });
     }
 
-    let hostname = "";
-    try {
-      hostname = new URL(cleanUrl).hostname;
-    } catch {
-      hostname = cleanUrl.replace(/^https?:\/\//, "").split("/")[0];
-    }
-
-    const suspiciousTLDs = [".top", ".xyz", ".cc", ".buzz", ".cam", ".rest", ".club", ".fit", ".tk", ".ml", ".ga", ".cf", ".gq", ".work", ".zip", ".mov"];
-    const hasSuspiciousTLD = suspiciousTLDs.some((tld) => hostname.endsWith(tld));
-    const isIpAddress = /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/.test(hostname);
-    const hasExcessiveHyphens = (hostname.match(/-/g) || []).length >= 2;
-
-    if (!ai) {
-      return res.json({
-        domain: hostname,
-        fullUrl: cleanUrl,
-        isSuspicious: hasSuspiciousTLD || isIpAddress || hasExcessiveHyphens,
-        threatLevel: hasSuspiciousTLD || isIpAddress ? "HIGH" : hasExcessiveHyphens ? "MEDIUM" : "LOW",
-        reason: hasSuspiciousTLD ? "High-risk top-level domain frequently associated with automated phishing campaigns." : "Standard domain syntax.",
-        spoofedBrand: null,
-      });
-    }
-
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: `Examine this URL and domain hostname: "${cleanUrl}" (Domain: "${hostname}").
-Detect if this domain is attempting typosquatting, brand impersonation (e.g. Bank of America, Apple, USPS, Google, Amazon, PayPal, Microsoft, Netflix, Instagram, WhatsApp), deceptive subdomains, or deceptive phishing redirect.
-Return JSON:
-{
-  "domain": "${hostname}",
-  "fullUrl": "${cleanUrl}",
-  "isSuspicious": boolean,
-  "threatLevel": "'HIGH', 'MEDIUM', or 'LOW'",
-  "spoofedBrand": "Name of brand spoofed or null",
-  "reason": "Clear explanation of findings",
-  "officialDomain": "Official legitimate domain of the brand if spoofed, or null"
-}`,
-      config: {
-        responseMimeType: "application/json",
+    const ai = await generateJson<{ isSuspicious?: boolean; threatLevel?: string; spoofedBrand?: string | null; reason?: string; officialDomain?: string | null }>({
+      systemInstruction: "You are a URL safety analyst. Never suggest visiting the URL. Answer strictly as JSON.",
+      prompt: `Examine this URL and hostname: "${finding.normalized}" (hostname: "${hostname}").
+Deterministic findings already established: ${finding.flags.length ? finding.flags.join("; ") : "none"}.
+Detect typosquatting, brand impersonation (banks, government, delivery, payment, social or tech brands), deceptive subdomains or phishing-style paths.
+Return JSON: {"isSuspicious": boolean, "threatLevel": "HIGH" | "MEDIUM" | "LOW", "spoofedBrand": string | null, "officialDomain": string | null, "reason": string}`,
+      schema: {
+        type: Type.OBJECT,
+        properties: {
+          isSuspicious: { type: Type.BOOLEAN },
+          threatLevel: { type: Type.STRING },
+          spoofedBrand: { type: Type.STRING, nullable: true },
+          officialDomain: { type: Type.STRING, nullable: true },
+          reason: { type: Type.STRING },
+        },
+        required: ["isSuspicious", "threatLevel", "reason"],
       },
+      temperature: 0.1,
     });
 
-    const result = JSON.parse(response.text || "{}");
-    return res.json(result);
-  } catch (error: any) {
-    console.error("Error inspecting domain:", error);
-    return res.status(500).json({ error: error?.message || "Domain inspection failed" });
+    if (!ai.ok) {
+      const notice = ai.code === "rate_limited" ? "Gemini is rate-limited right now. Rule-based inspection was used." : ai.code === "timeout" ? "Gemini did not respond in time. Rule-based inspection was used." : ai.code === "invalid_key" ? "The Gemini API key was rejected. Rule-based inspection was used." : "Gemini is temporarily unavailable. Rule-based inspection was used.";
+      return res.json({ ...ruleResult, notice });
+    }
+
+    const d = ai.data;
+    const aiLevel = ["HIGH", "MEDIUM", "LOW"].includes(String(d.threatLevel)) ? (String(d.threatLevel) as "HIGH" | "MEDIUM" | "LOW") : ruleResult.threatLevel;
+    // Deterministic evidence can raise but never be lowered by the model.
+    const rank = { LOW: 0, MEDIUM: 1, HIGH: 2 };
+    const threatLevel = rank[aiLevel] > rank[ruleResult.threatLevel] ? aiLevel : ruleResult.threatLevel;
+    return res.json({
+      ...ruleResult,
+      isSuspicious: ruleResult.isSuspicious || Boolean(d.isSuspicious),
+      threatLevel,
+      spoofedBrand: ruleResult.spoofedBrand || (typeof d.spoofedBrand === "string" && d.spoofedBrand.trim() ? d.spoofedBrand.trim().slice(0, 80) : null),
+      officialDomain: ruleResult.officialDomain || (typeof d.officialDomain === "string" && d.officialDomain.trim() ? d.officialDomain.trim().slice(0, 120) : null),
+      reason: typeof d.reason === "string" && d.reason.trim() ? d.reason.trim().slice(0, 800) : ruleResult.reason,
+      engine: "gemini",
+    });
+  } catch (error) {
+    console.error("Error inspecting domain:", error instanceof Error ? error.message : error);
+    return res.status(503).json({ error: "The link inspector hit an unexpected problem. Please try again, or run the full investigation.", code: "unavailable" });
   }
 });

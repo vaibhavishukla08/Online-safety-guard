@@ -1,4 +1,15 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Online Safety Guard - Outlook add-in manifest (single source of truth).
+
+  Adds an "Analyze with Online Safety Guard" button to the message-read ribbon
+  that opens outlook/taskpane.html. The pane reads the open email with Office.js
+  and sends it to the existing /api/analyze-email channel (same orchestrator,
+  agents and Gemini model as the web app).
+
+  Published by the Vite build at /manifest.xml and /outlook/manifest.xml on the
+  same origin as the task pane. For a localhost variant run `npm run manifest:local`.
+-->
 <OfficeApp
   xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -69,6 +80,9 @@
       <Host xsi:type="MailHost">
 
         <DesktopFormFactor>
+
+          <!-- Loaded once per session by the host; hosts outlook/commands.html (no UI-less commands yet). -->
+          <FunctionFile resid="Commands.Url"/>
 
           <ExtensionPoint xsi:type="MessageReadCommandSurface">
 
@@ -148,7 +162,7 @@
 
         <bt:String
           id="AnalyzeLabel"
-          DefaultValue="Analyze Email"/>
+          DefaultValue="Analyze with Online Safety Guard"/>
 
       </bt:ShortStrings>
 

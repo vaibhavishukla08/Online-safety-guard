@@ -1,9 +1,12 @@
 /**
  * Online Safety Guard — server entry point.
  *
- * Express app that serves the React frontend (Vite middleware in development,
- * static `dist/` in production) and two API surfaces:
+ * Boots the database (SQLite by default, PostgreSQL when DATABASE_URL is set),
+ * mounts the Express app from server/app.ts, serves the React frontend (Vite
+ * middleware in development, static `dist/` in production) and starts the
+ * mailbox polling scheduler.
  *
+ *   /api/auth, /api/connections, /api/mail, /api/notifications, /api/admin
  *   /api/*  (server/routes/api.ts)     – agentic investigation pipeline, incident
  *                                         response, safety coach, dashboard summary,
  *                                         Outlook add-in email channel
@@ -16,37 +19,22 @@
  *
  * All secrets are read from environment variables (see .env.example).
  */
-import express from "express";
 import path from "path";
 import fs from "fs";
 import os from "os";
 import http from "http";
 import https from "https";
 import dotenv from "dotenv";
+import express from "express";
 import { createServer as createViteServer } from "vite";
-import { apiRouter } from "./server/routes/api";
-import { legacyRouter } from "./server/routes/legacy";
-import { GEMINI_MODEL, getIntelKeys, hasGeminiKey } from "./server/config";
+import { createApp, installErrorHandler } from "./server/app";
+import { openDb } from "./server/db";
+import { GEMINI_MODEL, SYNC, getAppBaseUrl, getIntelKeys, getOAuthConfig, getSessionSecret, hasGeminiKey, IS_PRODUCTION } from "./server/config";
+import { startSyncScheduler } from "./server/services/sync";
 
 dotenv.config();
 
-const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-
-app.disable("x-powered-by");
-app.use(express.json({ limit: "15mb" }));
-
-// Malformed JSON bodies should produce a clear 400, not a stack trace.
-app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
-  if (err instanceof SyntaxError && "body" in (err as object)) {
-    res.status(400).json({ error: "Malformed JSON body.", code: "bad_request" });
-    return;
-  }
-  next(err);
-});
-
-app.use("/api", apiRouter);
-app.use("/api", legacyRouter);
 
 /** Resolve TLS material when HTTPS=true. Returns null (with a reason) when unavailable. */
 function loadTls(): { key: Buffer; cert: Buffer; source: string } | { error: string } {
@@ -65,8 +53,12 @@ function loadTls(): { key: Buffer; cert: Buffer; source: string } | { error: str
   return { error: "No certificate found. Run `npx office-addin-dev-certs install` or set SSL_KEY_FILE and SSL_CERT_FILE." };
 }
 
-// Vite middleware & Production static serving
 async function startServer() {
+  const dbInstance = await openDb();
+  getSessionSecret(); // warns loudly at boot if SESSION_SECRET is missing
+
+  const app = createApp();
+
   const useHttps = process.env.HTTPS === "true";
   let server: http.Server | https.Server;
   let tlsSource = "";
@@ -82,7 +74,7 @@ async function startServer() {
     server = http.createServer(app);
   }
 
-  if (process.env.NODE_ENV !== "production") {
+  if (!IS_PRODUCTION) {
     const vite = await createViteServer({
       // Bind HMR websockets to our own listener so they work over HTTPS too.
       server: { middlewareMode: true, hmr: process.env.DISABLE_HMR === "true" ? false : { server } },
@@ -91,7 +83,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, { index: false, maxAge: "1h", setHeaders: (res, file) => { if (file.endsWith(".html") || file.endsWith(".xml")) res.setHeader("Cache-Control", "no-cache"); } }));
     app.get("*", (req, res) => {
       // Multi-page build: keep the add-in pages addressable; everything else is the SPA.
       if (req.path.startsWith("/outlook/")) {
@@ -101,18 +93,28 @@ async function startServer() {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
+  installErrorHandler(app);
 
   server.listen(PORT, "0.0.0.0", () => {
     const keys = getIntelKeys();
+    const oauth = getOAuthConfig();
     const intel = Object.entries({ VirusTotal: keys.virusTotal, SafeBrowsing: keys.safeBrowsing, urlscan: keys.urlScan, AbuseIPDB: keys.abuseIpDb })
       .map(([name, key]) => `${name}=${key ? "on" : "off"}`)
       .join(" ");
     const scheme = useHttps ? "https" : "http";
     console.log(`Online Safety Guard server running on ${scheme}://localhost:${PORT}${useHttps ? ` (TLS via ${tlsSource})` : ""}`);
+    console.log(`  Public base URL: ${getAppBaseUrl()}`);
     console.log(`  Outlook task pane: ${scheme}://localhost:${PORT}/outlook/taskpane.html`);
+    console.log(`  Database: ${dbInstance.label}`);
     console.log(`  Gemini: ${hasGeminiKey() ? `configured (${GEMINI_MODEL})` : "NOT configured — deterministic mode"}`);
     console.log(`  Threat intel: RDAP=on DNS=on ${intel}`);
+    console.log(`  Mailbox OAuth: Microsoft=${oauth.microsoft.configured ? "on" : "off"} Google=${oauth.google.configured ? "on" : "off"}`);
+    const scheduled = startSyncScheduler();
+    console.log(`  Mailbox sync: ${scheduled ? `polling every ${SYNC.intervalMinutes} min (max ${SYNC.autoAnalyzeMax} auto analyses / run)` : "background polling disabled (SYNC_INTERVAL_MINUTES=0) — manual sync only"}`);
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error("Fatal: server failed to start:", err instanceof Error ? err.message : err);
+  process.exit(1);
+});

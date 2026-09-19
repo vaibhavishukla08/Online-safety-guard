@@ -9,6 +9,7 @@ import { scanSignals } from '../server/rules/signals';
 import { analyzeUrl } from '../server/agents/urlAgent';
 import { parseConversation } from '../server/agents/conversationAgent';
 import { buildBaseIncidentPlan } from '../server/services/incidentResponse';
+import { emailToInvestigationRequest } from '../server/services/email';
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = '') {
@@ -82,6 +83,36 @@ async function main() {
   const plan = buildBaseIncidentPlan(['shared_otp', 'clicked_link'], { claimedOrganization: 'State Bank of India (SBI)', paymentMethods: ['UPI'] });
   check('OTP sharing is critical urgency', plan.urgency === 'critical');
   check('India helpline included', plan.reporting.some((r) => r.includes('1930')));
+
+  console.log('\n[7] Outlook email channel (task pane → /api/analyze-email)');
+  const expectEmailError = (body: unknown, code: string) => {
+    try {
+      emailToInvestigationRequest(body);
+      return false;
+    } catch (e) {
+      return e instanceof InvestigationError && e.code === code;
+    }
+  };
+  check('empty email rejected', expectEmailError({ subject: '', body: ' ' }, 'empty_input'));
+  check('oversize email body rejected', expectEmailError({ subject: 'x', body: 'a'.repeat(20000) }, 'too_large'));
+  const mapped = emailToInvestigationRequest({
+    subject: 'URGENT: Your SBI account will be blocked today',
+    sender: 'SBI Alerts',
+    senderEmail: 'alerts@sbi-secure-login.xyz',
+    body: 'Dear customer, verify immediately: https://sbi-security-update.xyz/verify and share the OTP you receive.',
+    urls: ['https://sbi-security-update.xyz/verify', 'not a url'],
+    recipientCount: 1,
+    attachments: [{ name: 'KYC_Form.exe', size: 48213, contentType: 'application/octet-stream' }, { name: 'notes.txt', size: 12 }],
+  });
+  check('maps to the email input type', mapped.request.inputType === 'email');
+  check('subject folded into message', (mapped.request.message || '').startsWith('Subject: URGENT'));
+  check('sender rendered as "Name <address>"', mapped.request.sender === 'SBI Alerts <alerts@sbi-secure-login.xyz>');
+  check('invalid client URLs dropped', mapped.request.urls?.length === 1);
+  check('executable attachment flagged risky', mapped.envelope.attachments.map((a) => a.risky).join() === 'true,false');
+  const outlook = await investigate(validateRequest(mapped.request));
+  check('email phishing is CRITICAL via same orchestrator', outlook.verdict.level === 'CRITICAL', `${outlook.verdict.level} ${outlook.verdict.riskScore}`);
+  check('envelope preserved in report input', outlook.input.email?.attachments[0]?.risky === true);
+  check('attachment evidence recorded', outlook.evidence.some((e) => e.id === 'ev-risky_attachment'));
 
   console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
   process.exit(failures ? 1 : 0);

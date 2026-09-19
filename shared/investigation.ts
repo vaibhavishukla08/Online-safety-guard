@@ -81,6 +81,8 @@ export interface UrlFinding {
   hasCredentialKeywords: boolean;
   lookalikeOf?: string | null;
   subdomainDepth: number;
+  /** Hostname contains an xn-- (IDN/punycode) label. */
+  punycode?: boolean;
   flags: string[];
 }
 

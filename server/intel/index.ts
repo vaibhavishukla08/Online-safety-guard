@@ -15,6 +15,7 @@ import dns from 'node:dns/promises';
 import { getIntelKeys, TIMEOUTS } from '../config';
 import { fetchJson, cacheGet, cacheSet } from '../utils/http';
 import { isSafeHostnameForLookup, isIpAddress } from '../utils/url';
+import { recordFailure, recordSuccess, type ServiceId } from '../services/health';
 import type { IntelSourceResult, ExternalEvidence } from '../../shared/investigation';
 
 const CACHE_TTL = 5 * 60_000;
@@ -291,6 +292,11 @@ export async function gatherExternalEvidence(domain: string, urls: string[]): Pr
   const abuse = await abuseIpDbLookup(firstIp);
 
   const sources = [rdap, dnsRes, vt, gsb, urlscan, abuse];
+  const serviceIds: ServiceId[] = ['rdap', 'dns', 'virustotal', 'safebrowsing', 'urlscan', 'abuseipdb'];
+  sources.forEach((s, i) => {
+    if (s.status === 'ok') recordSuccess(serviceIds[i]);
+    else if (s.status === 'unavailable' || s.status === 'error') recordFailure(serviceIds[i], s.error || s.summary);
+  });
   const vtMal = ((vt.data?.malicious as number) || 0) + ((vt.data?.suspicious as number) || 0);
   const gsbMatches = (gsb.data?.matches as number) || 0;
   const usMal = (urlscan.data?.maliciousScans as number) || 0;

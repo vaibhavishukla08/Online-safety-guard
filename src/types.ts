@@ -22,6 +22,26 @@ export type {
   DashboardStats,
 } from '../shared/investigation';
 
+export type {
+  PublicUser,
+  UserRole,
+  NotifyPolicy,
+  EmailProviderId,
+  ConnectionStatus,
+  EmailRecord,
+  EmailRecordDetail,
+  EmailListQuery,
+  EmailListResult,
+  NotificationItem,
+  SyncResult,
+  AddinTokenInfo,
+  AdminOverview,
+  AdminUserRow,
+  ThreatAnalytics,
+  ServiceHealthReport,
+  AuditEntry,
+} from '../shared/accounts';
+
 export type SafetyStatus = 'SAFE' | 'SUSPICIOUS' | 'DANGEROUS_SCAM';
 
 export interface RedFlag {
@@ -91,6 +111,12 @@ export interface DomainInspectionResult {
   spoofedBrand?: string | null;
   reason: string;
   officialDomain?: string | null;
+  /** Deterministic flags from the URL Agent (always present on new responses). */
+  flags?: string[];
+  /** 'gemini' when the AI enriched the verdict, 'rule-based' when it fell back. */
+  engine?: 'gemini' | 'rule-based';
+  /** Explains a fallback (rate limit, missing key, timeout) — shown to the user. */
+  notice?: string | null;
 }
 
 /** Top-level navigation destinations. */

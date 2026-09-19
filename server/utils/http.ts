@@ -2,6 +2,7 @@
  * Networking helpers for tool use: bounded timeouts, small TTL cache, per-IP rate limiting.
  */
 import { RATE_LIMIT } from '../config';
+import { recordRateLimitBlock } from '../services/health';
 
 export interface FetchJsonResult<T> {
   ok: boolean;
@@ -70,8 +71,20 @@ export function checkRateLimit(clientId: string): { allowed: boolean; retryAfter
     return { allowed: true, retryAfterSec: 0 };
   }
   if (bucket.count >= RATE_LIMIT.maxRequests) {
+    recordRateLimitBlock();
     return { allowed: false, retryAfterSec: Math.ceil((bucket.resetAt - now) / 1000) };
   }
   bucket.count += 1;
   return { allowed: true, retryAfterSec: 0 };
+}
+
+/** Aggregate view for the admin health page (no client identifiers). */
+export function rateLimitStats(): { activeClients: number } {
+  const now = Date.now();
+  let active = 0;
+  for (const [key, bucket] of buckets) {
+    if (now > bucket.resetAt) buckets.delete(key);
+    else active += 1;
+  }
+  return { activeClients: active };
 }

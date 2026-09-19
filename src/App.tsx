@@ -14,21 +14,34 @@ import { IncidentResponse } from './components/IncidentResponse';
 import { SafetyCoach } from './components/SafetyCoach';
 import { SafetyDashboard } from './components/SafetyDashboard';
 import { ScanHistoryView } from './components/ScanHistoryView';
+import { NotificationCard } from './components/NotificationCard';
+import { AuthPage } from './pages/AuthPage';
+import { MailboxPage } from './pages/MailboxPage';
+import { ThreatsPage } from './pages/ThreatsPage';
+import { NotificationsPage } from './pages/NotificationsPage';
+import { SettingsPage } from './pages/SettingsPage';
+import { AdminPage } from './pages/AdminPage';
+import { AuthProvider, useAuth } from './auth/AuthContext';
+import { useRouter } from './router';
 import { reportToAnalysisResult, type AnalysisResult, type AppTab, type InvestigationReport, type InvestigationSeed } from './types';
 import { getScanHistory, saveScanToHistory, clearScanHistory } from './utils/storage';
 import { getPatternRecords, matchAgainstMemory, savePatternRecord, toPatternRecord } from './utils/patternMemory';
 import { getHealth } from './api/client';
-import { Lock, Download } from 'lucide-react';
-
-const VALID_TABS: AppTab[] = ['home', 'investigate', 'domain', 'incident', 'coach', 'dashboard', 'history'];
-
-function tabFromHash(): AppTab {
-  const h = window.location.hash.replace('#', '') as AppTab;
-  return VALID_TABS.includes(h) ? h : 'home';
-}
+import { Lock, Download, Bell, ArrowRight, Mail, Inbox } from 'lucide-react';
+import { Card, EmptyState, SecondaryButton } from './components/ui/primitives';
 
 export default function App() {
-  const [activeTab, setActiveTabState] = useState<AppTab>(() => (typeof window !== 'undefined' ? tabFromHash() : 'home'));
+  return (
+    <AuthProvider>
+      <AppShell />
+    </AuthProvider>
+  );
+}
+
+function AppShell() {
+  const router = useRouter();
+  const { page, navigate, setTab, search } = router;
+  const { user, status: authStatus, unread, notifications, markRead, dismiss, logout } = useAuth();
   const [currentAnalysis, setCurrentAnalysis] = useState<AnalysisResult | null>(null);
   const [memoryMatch, setMemoryMatch] = useState<{ similar: number; sharedLabel: string | null } | undefined>(undefined);
   const [seed, setSeed] = useState<InvestigationSeed | null>(null);
@@ -64,22 +77,15 @@ export default function App() {
     localStorage.setItem('online_guard_theme', theme);
   }, [theme]);
 
-  // Deep-linkable tabs via the URL hash (#investigate, #coach, …)
-  const setActiveTab = useCallback((tab: AppTab) => {
-    setActiveTabState(tab);
-    if (window.location.hash !== `#${tab}`) window.history.replaceState(null, '', `#${tab}`);
-  }, []);
-
-  useEffect(() => {
-    const onHash = () => setActiveTabState(tabFromHash());
-    window.addEventListener('hashchange', onHash);
-    return () => window.removeEventListener('hashchange', onHash);
-  }, []);
-
   useEffect(() => {
     setHistory(getScanHistory());
     getHealth().then((h) => setAiConfigured(h ? h.hasGeminiKey : false));
   }, []);
+
+  const activeTab: AppTab = page.kind === 'tabs' ? page.tab : 'home';
+
+  /** Deep-linkable tabs via the URL hash (#investigate, #coach, …) — unchanged behaviour. */
+  const setActiveTab = useCallback((tab: AppTab) => setTab(tab), [setTab]);
 
   const toggleTheme = () => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
 
@@ -124,7 +130,14 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const handleLogout = async () => {
+    await logout();
+    navigate('/');
+  };
+
   const latestInvestigation = useMemo(() => currentAnalysis?.investigation ? currentAnalysis : history.find((h) => h.investigation) || null, [currentAnalysis, history]);
+  const openCoach = () => setActiveTab('coach');
+  const unreadItems = notifications.filter((n) => n.status === 'unread').slice(0, 3);
 
   return (
     <div className={`min-h-dvh flex flex-col relative transition-colors duration-200 selection:bg-rose-500 selection:text-white ${theme === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
@@ -145,7 +158,8 @@ export default function App() {
       )}
 
       <Header
-        activeTab={activeTab}
+        page={page}
+        onNavigate={navigate}
         onSelectTab={setActiveTab}
         historyCount={history.length}
         theme={theme}
@@ -153,21 +167,45 @@ export default function App() {
         watermarkIntensity={watermarkIntensity}
         onCycleWatermark={cycleWatermarkIntensity}
         aiConfigured={aiConfigured}
+        user={user}
+        authStatus={authStatus}
+        unreadNotifications={unread}
+        onLogout={handleLogout}
       />
 
       <main id="main" className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8 relative z-10">
-        {activeTab === 'home' && (
-          <HomeDashboard history={history} aiConfigured={aiConfigured} onStart={startInvestigation} onNavigate={setActiveTab} onOpenScan={handleSelectFromHistory} />
+        {page.kind === 'tabs' && activeTab === 'home' && (
+          <div className="space-y-6">
+            {/* Security notifications for signed-in users (polling-based, one per email) */}
+            {authStatus === 'authenticated' && unreadItems.length > 0 && (
+              <section aria-label="Security notifications" className="space-y-2 animate-fadeIn">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2"><Bell className="w-4 h-4 text-purple-600" aria-hidden="true" /> Security notifications <span className="min-w-4 h-4 px-1 rounded-full bg-rose-600 text-white text-[10px] flex items-center justify-center font-bold">{unread}</span></h2>
+                  <button type="button" onClick={() => navigate('/notifications')} className="text-xs font-semibold text-rose-700 dark:text-rose-300 hover:underline cursor-pointer inline-flex items-center gap-1">All notifications <ArrowRight className="w-3 h-3" aria-hidden="true" /></button>
+                </div>
+                {unreadItems.map((n) => <NotificationCard key={n.id} item={n} onNavigate={navigate} onMarkRead={markRead} onDismiss={dismiss} />)}
+              </section>
+            )}
+            {authStatus === 'authenticated' && (
+              <div className="flex items-center gap-2 flex-wrap text-xs">
+                <span className="text-slate-500 dark:text-slate-400">Mailbox protection:</span>
+                <SecondaryButton onClick={() => navigate('/dashboard/outlook')}><Mail className="w-3.5 h-3.5 text-blue-600" aria-hidden="true" /> Outlook history</SecondaryButton>
+                <SecondaryButton onClick={() => navigate('/dashboard/gmail')}><Inbox className="w-3.5 h-3.5 text-red-600" aria-hidden="true" /> Gmail history</SecondaryButton>
+                <SecondaryButton onClick={() => navigate('/threats')}>Threats</SecondaryButton>
+              </div>
+            )}
+            <HomeDashboard history={history} aiConfigured={aiConfigured} onStart={startInvestigation} onNavigate={setActiveTab} onOpenScan={handleSelectFromHistory} />
+          </div>
         )}
 
-        {activeTab === 'investigate' && (
+        {page.kind === 'tabs' && activeTab === 'investigate' && (
           currentAnalysis ? (
             currentAnalysis.investigation ? (
               <InvestigationReportView
                 report={currentAnalysis.investigation}
                 memoryMatch={memoryMatch}
                 onScanAnother={() => { setCurrentAnalysis(null); setMemoryMatch(undefined); }}
-                onOpenCoach={() => setActiveTab('coach')}
+                onOpenCoach={openCoach}
               />
             ) : (
               <AnalysisReport result={currentAnalysis} onScanAnother={() => setCurrentAnalysis(null)} />
@@ -185,21 +223,31 @@ export default function App() {
           )
         )}
 
-        {activeTab === 'domain' && <DomainChecker onFullInvestigation={(url) => startInvestigation({ mode: 'url', url, autoRun: true })} />}
+        {page.kind === 'tabs' && activeTab === 'domain' && <DomainChecker onFullInvestigation={(url) => startInvestigation({ mode: 'url', url, autoRun: true })} />}
 
-        {activeTab === 'incident' && <IncidentResponse latest={latestInvestigation} />}
+        {page.kind === 'tabs' && activeTab === 'incident' && <IncidentResponse latest={latestInvestigation} />}
 
-        {activeTab === 'coach' && <SafetyCoach focusCategory={latestInvestigation?.investigation?.verdict.scamType || null} />}
+        {page.kind === 'tabs' && activeTab === 'coach' && <SafetyCoach focusCategory={latestInvestigation?.investigation?.verdict.scamType || null} />}
 
-        {activeTab === 'dashboard' && <SafetyDashboard history={history} onNewScan={() => startInvestigation({ mode: 'message' })} />}
+        {page.kind === 'tabs' && activeTab === 'dashboard' && <SafetyDashboard history={history} onNewScan={() => startInvestigation({ mode: 'message' })} />}
 
-        {activeTab === 'history' && (
+        {page.kind === 'tabs' && activeTab === 'history' && (
           <ScanHistoryView
             history={history}
             onSelectScan={handleSelectFromHistory}
             onClearHistory={handleClearHistory}
             onNewScan={() => startInvestigation({ mode: 'message' })}
           />
+        )}
+
+        {page.kind === 'login' && <AuthPage next={search.get('next')} onNavigate={navigate} />}
+        {page.kind === 'mailbox' && <MailboxPage key={page.provider} provider={page.provider} search={search} onNavigate={navigate} onOpenCoach={openCoach} />}
+        {page.kind === 'threats' && <ThreatsPage onNavigate={navigate} onOpenCoach={openCoach} onOpenLocalHistory={() => setActiveTab('history')} />}
+        {page.kind === 'notifications' && <NotificationsPage onNavigate={navigate} />}
+        {page.kind === 'settings' && <SettingsPage onNavigate={navigate} />}
+        {page.kind === 'admin' && <AdminPage section={page.section} onNavigate={navigate} />}
+        {page.kind === 'not_found' && (
+          <Card className="max-w-lg mx-auto"><EmptyState icon={Lock} title="Page not found" body="That address does not exist in Online Safety Guard." action={<SecondaryButton onClick={() => navigate('/')}>Back to dashboard</SecondaryButton>} /></Card>
         )}
       </main>
 
@@ -208,7 +256,7 @@ export default function App() {
         <div className="max-w-6xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-600 dark:text-slate-400">
           <div className="flex items-center gap-2">
             <Lock className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" aria-hidden="true" />
-            <span>Online Safety Guard — Privacy first: reports stay in your browser; pattern memory is anonymized.</span>
+            <span>Online Safety Guard — Privacy first: manual scans stay in your browser; mailbox analyses are private to your account and never keep full email bodies.</span>
           </div>
 
           <div className="flex items-center gap-4 flex-wrap">

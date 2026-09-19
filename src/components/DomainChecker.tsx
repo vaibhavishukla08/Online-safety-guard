@@ -34,14 +34,17 @@ export const DomainChecker: React.FC<DomainCheckerProps> = ({ onFullInvestigatio
         body: JSON.stringify({ url: target }),
       });
 
+      const data = await res.json().catch(() => null);
       if (!res.ok) {
-        throw new Error('Inspection service error');
+        // The server always explains *why* (invalid URL, rate limit, unavailable) — surface it verbatim.
+        const message = data && typeof data.error === 'string' ? data.error : res.status === 429 ? 'Too many requests. Please wait a minute and try again.' : `The inspector responded with HTTP ${res.status}. Please try again.`;
+        throw new Error(message);
       }
-
-      const data = await res.json();
-      setResult(data);
-    } catch (err: any) {
-      setError(err.message || 'Failed to inspect domain');
+      if (!data || typeof data !== 'object') throw new Error('The inspector returned an unreadable response. Please try again.');
+      setResult(data as DomainInspectionResult);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '';
+      setError(message && message !== 'Failed to fetch' ? message : 'Online Safety Guard could not reach the analysis server. Check your connection and try again.');
     } finally {
       setIsLoading(false);
     }
@@ -168,6 +171,14 @@ export const DomainChecker: React.FC<DomainCheckerProps> = ({ onFullInvestigatio
               </div>
             </div>
           )}
+
+          {/* Engine + fallback notice: users always know whether the AI took part */}
+          <div className="flex items-center gap-2 flex-wrap text-[11px]">
+            <span className={`px-2 py-0.5 rounded-full border font-semibold ${result.engine === 'gemini' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-800 dark:text-emerald-300' : 'bg-amber-500/10 border-amber-500/30 text-amber-900 dark:text-amber-300'}`}>
+              {result.engine === 'gemini' ? 'AI-assisted (Gemini + rules)' : 'Rule-based fallback'}
+            </span>
+            {result.notice && <span className="text-amber-800 dark:text-amber-300">{result.notice}</span>}
+          </div>
 
           {/* Detailed Reason */}
           <div className="space-y-1.5">

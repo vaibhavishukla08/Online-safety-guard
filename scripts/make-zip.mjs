@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outFile = path.join(root, 'public', 'online-safety-guard.zip');
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.claude', 'design-system']);
+const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.claude', 'design-system', 'data']);
 const SKIP_FILES = new Set(['online-safety-guard.zip', '.DS_Store']);
 
 // CRC-32 table
