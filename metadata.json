@@ -1,0 +1,8 @@
+{
+  "name": "Online Safety Guard",
+  "description": "An agentic AI cyber-safety assistant that investigates suspicious messages, screenshots, links and conversations, verifies evidence, explains its reasoning and generates a personalised protection plan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
