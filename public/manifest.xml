@@ -42,7 +42,7 @@
     <Form xsi:type="ItemRead">
       <DesktopSettings>
         <SourceLocation DefaultValue="https://online-safety-guard.onrender.com/outlook/taskpane.html"/>
-        <RequestedHeight>600</RequestedHeight>
+        <RequestedHeight>450</RequestedHeight>
       </DesktopSettings>
     </Form>
   </FormSettings>
