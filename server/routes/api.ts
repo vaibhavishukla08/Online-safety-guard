@@ -157,7 +157,8 @@ async function analyzeAddinEmail(req: Request, onTrace?: (step: TraceStep) => vo
       recipientCount: mapped.envelope.recipientCount,
       truncated: mapped.envelope.truncated,
     }, { force: Boolean(body.force), trigger: 'addin', ip: authClientIp(req), onTrace });
-    return { report: outcome.report, meta: { saved: true, cached: outcome.cached, recordId: outcome.record.id } };
+    // A history/database failure is reported in meta, never as an error: the analysis itself succeeded.
+    return { report: outcome.report, meta: { saved: outcome.saved, cached: outcome.cached, recordId: outcome.record?.id ?? null, ...(outcome.saved ? {} : { reason: 'save_failed' }) } };
   }
   const report = await investigate(request, onTrace);
   return { report, meta: { saved: false, cached: false, recordId: null, reason: req.auth ? 'no_message_id' : 'not_linked' } };

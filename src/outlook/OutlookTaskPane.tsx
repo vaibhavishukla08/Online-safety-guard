@@ -299,6 +299,9 @@ export const OutlookTaskPane: React.FC = () => {
               <Notice tone="info"><strong>Showing the saved analysis</strong> from {new Date(report.timestamp).toLocaleString()} — this email was analysed before, so it was not analysed again. Use <em>Re-analyze</em> to run it afresh.</Notice>
             )}
             {meta?.saved && !meta.cached && <Notice tone="success">Saved to your Outlook history on the Online Safety Guard website.</Notice>}
+            {meta && !meta.saved && meta.reason === 'save_failed' && (
+              <Notice tone="warn">The analysis completed, but it could not be saved to your Outlook history right now. The result below is still valid — it will be saved the next time you analyse this email.</Notice>
+            )}
             {meta && !meta.saved && meta.reason === 'not_linked' && (
               <p className="text-[11px] text-slate-500 dark:text-slate-400 flex items-start gap-1.5"><Save className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" aria-hidden="true" /> Not saved — <button type="button" onClick={() => setLinkOpen(true)} className="underline font-semibold cursor-pointer">link your account</button> to keep a history of analysed emails.</p>
             )}

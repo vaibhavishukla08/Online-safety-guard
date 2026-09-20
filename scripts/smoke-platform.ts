@@ -16,6 +16,7 @@ import { normalizeGmailMessage, parseAddress } from '../server/providers/gmail';
 import { htmlToText } from '../server/providers/http';
 import { decryptSecret, encryptSecret, hashPassword, verifyPassword } from '../server/auth/crypto';
 import { db } from '../server/db';
+import { SCHEMA } from '../server/db/schema';
 
 process.env.ADMIN_EMAILS = 'admin@example.test';
 process.env.SESSION_SECRET = 'smoke-test-secret-value-1234567890';
@@ -276,7 +277,21 @@ async function main() {
 
   await mockedOAuthFlows(alice);
 
-  console.log('\n[P12] Auth rate limiting');
+  console.log('\n[P12] Add-in analysis survives a history/database failure');
+  r = await call(alice, 'POST', '/api/auth/link-code');
+  r = await call(anon, 'POST', '/api/auth/link-code/redeem', { code: r.data.code, label: 'Outlook (failure test)' });
+  const addin2: Client = { cookie: null, bearer: r.data.token };
+  await db().run('DROP TABLE email_records');
+  r = await call(addin2, 'POST', '/api/analyze-email', { ...PHISH, internetMessageId: '<save-fail@example.test>' });
+  check('analysis still returns the verdict when history cannot be written', r.status === 200 && r.data.verdict?.level === 'CRITICAL' && r.data.evidence?.length > 0, `${r.status} ${JSON.stringify(r.data).slice(0, 160)}`);
+  check('failure is reported in meta, not as an error', r.data.meta?.saved === false && r.data.meta?.reason === 'save_failed' && r.data.meta?.recordId === null, JSON.stringify(r.data?.meta));
+  for (const statement of SCHEMA) if (/email_records/.test(statement)) await db().run(statement);
+  r = await call(addin2, 'POST', '/api/analyze-email', { ...PHISH, internetMessageId: '<save-fail@example.test>' });
+  check('saving resumes once the database is back', r.status === 200 && r.data.meta?.saved === true && typeof r.data.meta?.recordId === 'string', JSON.stringify(r.data?.meta));
+  r = await call(alice, 'GET', '/api/mail/messages?provider=outlook&search=blocked');
+  check('recovered record is in the history', r.status === 200 && r.data.total === 1 && r.data.items[0].internetMessageId === 'save-fail@example.test' && r.data.items[0].riskLevel === 'CRITICAL', JSON.stringify(r.data).slice(0, 160));
+
+  console.log('\n[P13] Auth rate limiting');
   let limited = false;
   for (let i = 0; i < 30 && !limited; i++) {
     const a = await call(anon, 'POST', '/api/auth/login', { email: 'alice@example.test', password: 'wrong' });

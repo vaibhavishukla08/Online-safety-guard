@@ -59,7 +59,7 @@ mailRouter.get('/messages/:id', async (req, res) => {
 async function analyzeStored(req: Request, record: EmailRecordDetail, onTrace?: (step: TraceStep) => void): Promise<AnalyzeOutcome> {
   const userId = req.auth!.user.id;
   const force = Boolean((req.body || {}).force);
-  if (record.analysis && record.analysisStatus === 'analyzed' && !force) return { record, report: record.analysis, cached: true, notified: false };
+  if (record.analysis && record.analysisStatus === 'analyzed' && !force) return { record, report: record.analysis, cached: true, notified: false, saved: true, saveError: null };
   const provider = getProvider(record.provider);
   let access;
   try {
@@ -79,7 +79,7 @@ mailRouter.post('/messages/:id/analyze', async (req, res) => {
     const record = await findEmail(req.auth!.user.id, String(req.params.id));
     if (!record) throw new InvestigationError(404, 'Email not found.', 'not_found');
     const outcome = await analyzeStored(req, record);
-    res.json({ record: outcome.record, report: outcome.report, cached: outcome.cached, notified: outcome.notified });
+    res.json({ record: outcome.record ?? record, report: outcome.report, cached: outcome.cached, notified: outcome.notified, saved: outcome.saved, saveError: outcome.saveError });
   } catch (error) {
     handleError(error, res);
   }
@@ -104,7 +104,7 @@ mailRouter.post('/messages/:id/analyze/stream', async (req, res: Response) => {
   };
   try {
     const outcome = await analyzeStored(req, record, (step) => send({ type: 'trace', step }));
-    send({ type: 'result', report: outcome.report, meta: { recordId: outcome.record.id, cached: outcome.cached, notified: outcome.notified, saved: true } });
+    send({ type: 'result', report: outcome.report, meta: { recordId: outcome.record?.id ?? record.id, cached: outcome.cached, notified: outcome.notified, saved: outcome.saved, ...(outcome.saved ? {} : { reason: 'save_failed' }) } });
   } catch (error) {
     const { message, code } = describeError(error);
     send({ type: 'error', message, code });
