@@ -34,7 +34,8 @@ interface Sample {
 
 const WINDOW_MS = 60 * 60_000;
 const samples = new Map<ServiceId, Sample[]>();
-const recentFailures: Array<{ service: string; message: string; at: string }> = [];
+const recentFailures: Array<{ service: string; message: string; detail?: string; at: string }> = [];
+let lastGeminiErrorCode: string | null = null;
 const startedAt = Date.now();
 let blockedLastHour: number[] = [];
 let lastSyncRun: { at: string; summary: string } | null = null;
@@ -53,13 +54,29 @@ function bucket(id: ServiceId): Sample[] {
 
 export function recordSuccess(id: ServiceId): void {
   bucket(id).push({ at: Date.now(), ok: true });
+  if (id === 'gemini') lastGeminiErrorCode = null;
 }
 
-export function recordFailure(id: ServiceId, message: string): void {
+/**
+ * `detail` is the upstream error text. It stays on the admin-only report and in
+ * the logs; /api/health exposes the classified code alone, because provider
+ * errors can carry project or account identifiers.
+ */
+export function recordFailure(id: ServiceId, message: string, detail?: string): void {
   const safe = String(message || 'failure').slice(0, 200);
   bucket(id).push({ at: Date.now(), ok: false, message: safe });
-  recentFailures.unshift({ service: LABELS[id], message: safe, at: new Date().toISOString() });
+  recentFailures.unshift({ service: LABELS[id], message: safe, detail: detail ? String(detail).slice(0, 300) : undefined, at: new Date().toISOString() });
   if (recentFailures.length > 50) recentFailures.length = 50;
+  if (id === 'gemini') lastGeminiErrorCode = safe.split(':')[0] || 'unavailable';
+}
+
+/** Classified code of the most recent Gemini failure — safe to expose publicly. */
+export function geminiLastErrorCode(): string | null {
+  return lastGeminiErrorCode;
+}
+
+export function clearGeminiError(): void {
+  lastGeminiErrorCode = null;
 }
 
 export function recordRateLimitBlock(): void {

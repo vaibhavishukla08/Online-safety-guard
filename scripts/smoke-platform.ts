@@ -15,6 +15,8 @@ import { normalizeGraphMessage } from '../server/providers/outlook';
 import { normalizeGmailMessage, parseAddress } from '../server/providers/gmail';
 import { htmlToText } from '../server/providers/http';
 import { decryptSecret, encryptSecret, hashPassword, verifyPassword } from '../server/auth/crypto';
+import { classifyGeminiError, generateJson } from '../server/gemini/client';
+import { geminiLastErrorCode } from '../server/services/health';
 import { db } from '../server/db';
 import { SCHEMA } from '../server/db/schema';
 
@@ -302,6 +304,7 @@ async function main() {
   server.close();
 
   await unreachableDatabaseStillBoots();
+  await geminiFailuresAreDiagnosable();
 
   console.log(failures ? `\n${failures} check(s) failed` : '\nAll platform checks passed');
   process.exit(failures ? 1 : 0);
@@ -499,6 +502,54 @@ async function unreachableDatabaseStillBoots() {
   } finally {
     if (realUrl === undefined) delete process.env.DATABASE_URL;
     else process.env.DATABASE_URL = realUrl;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// [P15] A configured-but-failing Gemini key must say WHY. The pipeline falls
+// back to deterministic rules either way, so an unclassified failure is
+// invisible in production — which is exactly how a wrong GEMINI_MODEL hid.
+// ---------------------------------------------------------------------------
+async function geminiFailuresAreDiagnosable() {
+  console.log('\n[P15] Gemini failures are classified, not swallowed');
+  // Wording the real API uses for a model the key cannot call.
+  const notFound = 'got status: 404 Not Found. {"error":{"code":404,"message":"models/gemini-3.8-flash is not found for API version v1beta, or is not supported for generateContent.","status":"NOT_FOUND"}}';
+  const f = classifyGeminiError(new Error(notFound));
+  check('404 classifies as model_not_found', f.code === 'model_not_found', f.code);
+  check('message points at GEMINI_MODEL', /GEMINI_MODEL/.test(f.message), f.message);
+  check('upstream text kept in detail', (f.detail || '').includes('is not found for API version'), String(f.detail).slice(0, 80));
+  check('401 still invalid_key', classifyGeminiError(new Error('got status: 401 Unauthorized')).code === 'invalid_key');
+  check('429 still rate_limited', classifyGeminiError(new Error('got status: 429 RESOURCE_EXHAUSTED')).code === 'rate_limited');
+  check('500 stays unavailable', classifyGeminiError(new Error('got status: 500 Internal Server Error')).code === 'unavailable');
+  check('"generateContent" is not read as a rate limit', classifyGeminiError(new Error('got status: 500 on generateContent')).code === 'unavailable');
+
+  // Node's fetch hides the real transport error in `cause`; reading .message alone
+  // reported these as a bare "unavailable" with nothing to act on.
+  const wrapped = new Error('fetch failed');
+  (wrapped as Error & { cause?: unknown }).cause = Object.assign(new Error('getaddrinfo ENOTFOUND generativelanguage.googleapis.com'), { code: 'ENOTFOUND' });
+  const net = classifyGeminiError(wrapped);
+  check('wrapped fetch failure classifies as network', net.code === 'network', net.code);
+  check('cause chain reaches detail', (net.detail || '').includes('ENOTFOUND'), String(net.detail).slice(0, 100));
+
+  // End-to-end through the real SDK against a local endpoint that 404s.
+  const prevKey = process.env.GEMINI_API_KEY;
+  const prevBase = process.env.GEMINI_BASE_URL;
+  const mock = http.createServer((_req, res) => {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { code: 404, message: 'models/gemini-3.8-flash is not found for API version v1beta, or is not supported for generateContent.', status: 'NOT_FOUND' } }));
+  });
+  await new Promise<void>((resolve) => mock.listen(0, '127.0.0.1', resolve));
+  process.env.GEMINI_API_KEY = 'smoke-test-key';
+  process.env.GEMINI_BASE_URL = `http://127.0.0.1:${(mock.address() as { port: number }).port}`;
+  try {
+    const res = await generateJson({ prompt: 'ping', timeoutMs: 8000 });
+    check('generateJson returns a failure instead of throwing', res.ok === false);
+    if (!res.ok) check('end-to-end code is model_not_found', res.code === 'model_not_found', `${res.code}: ${String(res.detail).slice(0, 120)}`);
+    check('/api/health would report the code', geminiLastErrorCode() === 'model_not_found', String(geminiLastErrorCode()));
+  } finally {
+    mock.close();
+    if (prevKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = prevKey;
+    if (prevBase === undefined) delete process.env.GEMINI_BASE_URL; else process.env.GEMINI_BASE_URL = prevBase;
   }
 }
 

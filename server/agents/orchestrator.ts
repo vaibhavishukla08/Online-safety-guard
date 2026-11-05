@@ -267,7 +267,7 @@ export async function investigate(req: InvestigationRequest, onTrace: (step: Tra
   // ---------------------------------------------------------------- REPORT
   const engine: EngineMode = !isGeminiConfigured() ? 'deterministic' : ctx.aiCallsSucceeded === 0 ? 'deterministic' : ctx.aiFailures.length ? 'hybrid' : 'gemini';
   if (!isGeminiConfigured()) ctx.notices.unshift('Gemini API key not configured — running deterministic rules and external checks only.');
-  else if (ctx.aiCallsSucceeded === 0 && ctx.aiFailures.length) ctx.notices.unshift(`AI analysis unavailable (${ctx.aiFailures[0].replace('_', ' ')}) — results are rule-based.`);
+  else if (ctx.aiCallsSucceeded === 0 && ctx.aiFailures.length) ctx.notices.unshift(`AI analysis unavailable (${ctx.aiFailures[0].replace(/_/g, ' ')}) — results are rule-based.`);
   else if (ctx.aiFailures.length) ctx.notices.push(`${ctx.aiFailures.length} AI step${ctx.aiFailures.length === 1 ? '' : 's'} fell back to rules (${Array.from(new Set(ctx.aiFailures)).join(', ').replace(/_/g, ' ')}).`);
 
   const report: InvestigationReport = {

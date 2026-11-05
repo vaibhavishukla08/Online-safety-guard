@@ -16,6 +16,7 @@ import { checkRateLimit } from '../utils/http';
 import { investigate, InvestigationError, validateRequest } from '../agents/orchestrator';
 import { describeError, handleError } from './errors';
 import { isDbOpen, dbFallbackReason, db } from '../db';
+import { geminiLastErrorCode } from '../services/health';
 import { analyzeEmailForUser } from '../services/emailAnalysis';
 import { normalizeMessageId, type NormalizedEmail } from '../services/emails';
 import { clientIp as authClientIp } from '../auth/middleware';
@@ -61,6 +62,9 @@ apiRouter.get('/health', async (_req, res) => {
     status: database.ok && !fallback ? 'ok' : 'degraded',
     hasGeminiKey: hasGeminiKey(),
     model: GEMINI_MODEL,
+    // A configured key that still fails is invisible otherwise — the pipeline
+    // just quietly drops to deterministic rules. Code only, never upstream text.
+    gemini: { configured: hasGeminiKey(), model: GEMINI_MODEL, lastError: geminiLastErrorCode() },
     intel: {
       rdap: true,
       dns: true,

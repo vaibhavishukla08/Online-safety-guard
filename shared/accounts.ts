@@ -215,7 +215,7 @@ export interface ServiceHealthReport {
   database: { kind: string; ok: boolean; fallback?: string | null };
   services: ServiceStatus[];
   errorRate: number;
-  recentFailures: Array<{ service: string; message: string; at: string }>;
+  recentFailures: Array<{ service: string; message: string; detail?: string; at: string }>;
   rateLimit: { perMinute: number; activeClients: number; blockedLastHour: number };
   sync: { enabled: boolean; intervalMinutes: number; lastRunAt: string | null; lastRunSummary: string | null };
 }
