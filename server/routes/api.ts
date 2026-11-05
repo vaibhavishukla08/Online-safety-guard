@@ -15,7 +15,7 @@ import { GEMINI_MODEL, SYNC, getAppBaseUrl, getIntelKeys, getOAuthConfig, hasGem
 import { checkRateLimit } from '../utils/http';
 import { investigate, InvestigationError, validateRequest } from '../agents/orchestrator';
 import { describeError, handleError } from './errors';
-import { isDbOpen, db } from '../db';
+import { isDbOpen, dbFallbackReason, db } from '../db';
 import { analyzeEmailForUser } from '../services/emailAnalysis';
 import { normalizeMessageId, type NormalizedEmail } from '../services/emails';
 import { clientIp as authClientIp } from '../auth/middleware';
@@ -45,7 +45,7 @@ function rateLimited(req: Request, res: Response): boolean {
 apiRouter.get('/health', async (_req, res) => {
   const keys = getIntelKeys();
   const oauth = getOAuthConfig();
-  let database: { ok: boolean; kind: string } = { ok: false, kind: 'not initialised' };
+  let database: { ok: boolean; kind: string; fallback?: string } = { ok: false, kind: 'not initialised' };
   if (isDbOpen()) {
     try {
       await db().get('SELECT 1 AS one');
@@ -54,8 +54,11 @@ apiRouter.get('/health', async (_req, res) => {
       database = { ok: false, kind: db().dialect };
     }
   }
+  // Reachable, but not the database that was configured — say so.
+  const fallback = dbFallbackReason();
+  if (fallback) database = { ...database, fallback };
   res.json({
-    status: database.ok ? 'ok' : 'degraded',
+    status: database.ok && !fallback ? 'ok' : 'degraded',
     hasGeminiKey: hasGeminiKey(),
     model: GEMINI_MODEL,
     intel: {

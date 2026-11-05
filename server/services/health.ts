@@ -6,7 +6,7 @@
  * Never pass secrets, tokens or message bodies to recordFailure().
  */
 import { GEMINI_MODEL, RATE_LIMIT, SYNC, getIntelKeys, getOAuthConfig, hasGeminiKey } from '../config';
-import { isDbOpen, db } from '../db';
+import { isDbOpen, db, dbFallbackReason } from '../db';
 import type { ServiceHealthReport, ServiceState, ServiceStatus } from '../../shared/accounts';
 
 export type ServiceId = 'gemini' | 'rdap' | 'dns' | 'virustotal' | 'safebrowsing' | 'urlscan' | 'abuseipdb' | 'microsoft_oauth' | 'microsoft_graph' | 'google_oauth' | 'gmail_api' | 'api';
@@ -135,7 +135,7 @@ export async function getServiceHealth(activeRateLimitClients: number): Promise<
   return {
     generatedAt: new Date().toISOString(),
     uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
-    database: { kind: dbKind, ok: dbOk },
+    database: { kind: dbKind, ok: dbOk, fallback: dbFallbackReason() },
     services,
     errorRate,
     recentFailures: recentFailures.slice(0, 20),

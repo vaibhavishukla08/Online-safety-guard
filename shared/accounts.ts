@@ -211,7 +211,8 @@ export interface ServiceStatus {
 export interface ServiceHealthReport {
   generatedAt: string;
   uptimeSec: number;
-  database: { kind: string; ok: boolean };
+  /** `fallback` explains why the configured database is not the one in use. */
+  database: { kind: string; ok: boolean; fallback?: string | null };
   services: ServiceStatus[];
   errorRate: number;
   recentFailures: Array<{ service: string; message: string; at: string }>;

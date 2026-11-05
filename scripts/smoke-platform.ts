@@ -8,7 +8,7 @@
  */
 import http from 'node:http';
 import { createApp, installErrorHandler } from '../server/app';
-import { resetDbForTests } from '../server/db';
+import { resetDbForTests, dbFallbackReason } from '../server/db';
 import { prefilterScore } from '../server/services/emailAnalysis';
 import { policyAllows } from '../server/services/notifications';
 import { normalizeGraphMessage } from '../server/providers/outlook';
@@ -300,6 +300,9 @@ async function main() {
   check('auth attempts are rate limited', limited);
 
   server.close();
+
+  await unreachableDatabaseStillBoots();
+
   console.log(failures ? `\n${failures} check(s) failed` : '\nAll platform checks passed');
   process.exit(failures ? 1 : 0);
 }
@@ -457,6 +460,45 @@ async function mockedOAuthFlows(alice: Client) {
     check('health tracked Microsoft Graph + OAuth calls', r.data.services.find((s: any) => s.id === 'microsoft_graph').calls > 0 && r.data.services.find((s: any) => s.id === 'microsoft_oauth').failures >= 1);
   } finally {
     globalThis.fetch = realFetch;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// [P14] An unreachable DATABASE_URL must not take the whole service down.
+// Render's managed Postgres can expire or be deleted; when that happens the
+// server has to keep serving investigation, the SPA and the Outlook task pane
+// instead of crash-looping, and say so on /api/health.
+// ---------------------------------------------------------------------------
+async function unreachableDatabaseStillBoots() {
+  console.log('\n[P14] Unreachable DATABASE_URL degrades instead of crashing');
+  const realUrl = process.env.DATABASE_URL;
+  // Reserved TEST-NET-1 address (RFC 5737) — never routable, so this always fails.
+  process.env.DATABASE_URL = 'postgres://u:p@192.0.2.1:5432/gone?connect_timeout=2';
+  try {
+    const opened = await resetDbForTests({ keepDatabaseUrl: true });
+    check('openDb() resolves instead of throwing', Boolean(opened));
+    check('falls back to SQLite', opened.dialect === 'sqlite', opened.dialect);
+    check('fallback reason names PostgreSQL', /PostgreSQL unavailable/.test(dbFallbackReason() || ''), String(dbFallbackReason()));
+
+    const app = createApp();
+    installErrorHandler(app);
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const r = await call({ cookie: null, bearer: null }, 'GET', '/api/health');
+    check('/api/health answers 200 so the platform health check passes', r.status === 200, String(r.status));
+    check('health reports degraded with the reason', r.data.status === 'degraded' && /PostgreSQL/.test(r.data.database?.fallback || ''), JSON.stringify(r.data.database));
+
+    const inv = await call({ cookie: null, bearer: null }, 'POST', '/api/investigate', {
+      inputType: 'message',
+      channel: 'sms',
+      message: 'URGENT: verify your identity & OTP at chase-security-restore.cc/auth or your card is suspended.',
+    });
+    check('investigation still runs without a database', inv.status === 200 && inv.data.verdict?.level === 'CRITICAL', `${inv.status} ${JSON.stringify(inv.data).slice(0, 120)}`);
+    server.close();
+  } finally {
+    if (realUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = realUrl;
   }
 }
 
